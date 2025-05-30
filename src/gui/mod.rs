@@ -149,7 +149,6 @@ pub struct App {
     resolve_mod_rid: Option<MessageHandle<()>>,
     integrate_rid: Option<MessageHandle<HashMap<ModSpecification, SpecFetchProgress>>>,
     update_rid: Option<MessageHandle<()>>,
-    check_updates_rid: Option<MessageHandle<()>>,
     has_run_init: bool,
     request_counter: RequestCounter,
     window_provider_parameters: Option<WindowProviderParameters>,
@@ -159,8 +158,6 @@ pub struct App {
     settings_window: Option<WindowSettings>,
     modio_texture_handle: Option<egui::TextureHandle>,
     last_action: Option<LastAction>,
-    available_update: Option<GitHubRelease>,
-    show_update_time: Option<SystemTime>,
     open_profiles: HashSet<String>,
     lint_rid: Option<MessageHandle<()>>,
     lint_report_window: Option<WindowLintReport>,
@@ -169,7 +166,7 @@ pub struct App {
     lint_options: LintOptions,
     cache: CommonMarkCache,
     needs_restart: bool,
-    self_update_rid: Option<MessageHandle<SelfUpdateProgress>>,
+
     original_exe_path: Option<PathBuf>,
     problematic_mod_id: Option<u32>,
 }
@@ -242,7 +239,6 @@ impl App {
             resolve_mod_rid: None,
             integrate_rid: None,
             update_rid: None,
-            check_updates_rid: None,
             has_run_init: false,
             window_provider_parameters: None,
             search_string: Default::default(),
@@ -251,8 +247,6 @@ impl App {
             settings_window: None,
             modio_texture_handle: None,
             last_action: None,
-            available_update: None,
-            show_update_time: None,
             open_profiles: Default::default(),
             lint_rid: None,
             lint_report_window: None,
@@ -261,7 +255,7 @@ impl App {
             lint_options: LintOptions::default(),
             cache: Default::default(),
             needs_restart: false,
-            self_update_rid: None,
+
             original_exe_path: None,
             problematic_mod_id: None,
         })
@@ -829,94 +823,6 @@ impl App {
         string
     }
 
-    fn show_update_window(&mut self, ctx: &egui::Context) {
-        if let (Some(update), Some(update_time)) =
-            (self.available_update.as_ref(), self.show_update_time)
-        {
-            let now = SystemTime::now();
-            let wait_time = Duration::from_secs(1);
-            let inner_rect = ctx.input(|i| i.viewport().inner_rect.unwrap_or(egui::Rect::ZERO));
-
-            egui::Area::new("available-update-overlay".into())
-                .movable(false)
-                .fixed_pos(Pos2::ZERO)
-                .order(egui::Order::Background)
-                .show(ctx, |ui| {
-                    egui::Frame::none()
-                        .fill(Color32::from_rgba_unmultiplied(0, 0, 0, 127))
-                        .show(ui, |ui| {
-                            ui.allocate_space(egui::Vec2::new(inner_rect.width(), inner_rect.height()));
-                        })
-                });
-            if let Some(MessageHandle { state, .. }) = &self.self_update_rid {
-                egui::Window::new("Update progress")
-                    .collapsible(false)
-                    .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-                    .resizable(false)
-                    .show(ctx, |ui| {
-                        ui.with_layout(egui::Layout::top_down_justified(Align::Center), |ui| {
-                            match state {
-                                SelfUpdateProgress::Pending => {
-                                    ui.add(egui::ProgressBar::new(0.0).show_percentage());
-                                }
-                                SelfUpdateProgress::Progress { progress, size } => {
-                                    ui.add(
-                                        egui::ProgressBar::new(*progress as f32 / *size as f32)
-                                            .show_percentage(),
-                                    );
-                                }
-                                SelfUpdateProgress::Complete => {
-                                    ui.add(egui::ProgressBar::new(1.0).show_percentage());
-                                    ui.label(
-                                        egui::RichText::new("Update successful.")
-                                            .color(Color32::LIGHT_GREEN),
-                                    );
-
-                                    if ui.button("Restart").clicked() {
-                                        self.needs_restart = true;
-                                    }
-                                }
-                            };
-                        });
-                    });
-            } else {
-                egui::Window::new(format!("Update available: {}", update.tag_name))
-                    .collapsible(false)
-                    .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-                    .resizable(false)
-                    .show(ctx, |ui| {
-                        CommonMarkViewer::new().max_image_width(Some(512)).show(
-                            ui,
-                            &mut self.cache,
-                            &update.body,
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(Align::TOP), |ui| {
-                            if ui
-                                .add(egui::Button::new("Install update"))
-                                .on_hover_text("Download and install the update.")
-                                .clicked()
-                            {
-                                self.self_update_rid = Some(message::SelfUpdate::send(
-                                    &mut self.request_counter,
-                                    self.tx.clone(),
-                                    ctx.clone(),
-                                ));
-                            }
-
-                            let elapsed = now.duration_since(update_time).unwrap_or_default();
-                            if elapsed > wait_time {
-                                if ui.button("Close").clicked() {
-                                    self.show_update_time = None;
-                                }
-                            } else {
-                                ui.spinner();
-                            }
-                        });
-                    });
-            }
-        }
-    }
-
     fn show_provider_parameters(&mut self, ctx: &egui::Context) {
         let Some(window) = &mut self.window_provider_parameters else {
             return;
@@ -1217,8 +1123,8 @@ impl App {
 
                         if ui
                             .add_enabled(
-                                self.check_updates_rid.is_none()
-                                    && self.integrate_rid.is_none()
+                                self.integrate_rid.is_none()
+                                    && self.update_rid.is_none()
                                     && self.lint_rid.is_none(),
                                 egui::Button::new("Generate report"),
                             )
@@ -1735,8 +1641,6 @@ impl eframe::App for App {
 
             let theme = GuiTheme::into_egui_theme(self.state.config.gui_theme);
             ctx.memory_mut(|m| m.options.theme_preference = theme);
-
-            message::CheckUpdates::send(self, ctx);
         }
 
         // message handling
@@ -1746,7 +1650,6 @@ impl eframe::App for App {
 
         // begin draw
 
-        self.show_update_window(ctx);
         self.show_provider_parameters(ctx);
         self.show_profile_windows(ctx);
         self.show_settings(ctx);
@@ -1758,9 +1661,7 @@ impl eframe::App for App {
                 ui.add_enabled_ui(
                     self.integrate_rid.is_none()
                         && self.update_rid.is_none()
-                        && self.lint_rid.is_none()
-                        && self.self_update_rid.is_none()
-                        && self.state.config.drg_pak_path.is_some(),
+                        && self.lint_rid.is_none(),
                     |ui| {
                         if let Some(args) = &self.args {
                             if ui
@@ -1890,34 +1791,11 @@ impl eframe::App for App {
                     }
                     ui.spinner();
                 }
-                // if ui
-                //     .button("Lint mods")
-                //     .on_hover_text("Lint mods in the current profile")
-                //     .clicked()
-                // {
-                //     self.lints_toggle_window = Some(WindowLintsToggle);
-                // }
 
                 if ui.button("⚙").on_hover_text("Open settings").clicked() {
                     self.settings_window = Some(WindowSettings::new(&self.state));
                 }
-                if let Some(available_update) = &self.available_update {
-                    if ui
-                        .button(egui::RichText::new("\u{26A0}").color(ui.visuals().warn_fg_color))
-                        .on_hover_text(format!(
-                            "Update available: {}\n{}",
-                            available_update.tag_name, available_update.html_url
-                        ))
-                        .clicked()
-                    {
-                        ui.ctx().output_mut(|o| {
-                            o.open_url = Some(egui::output::OpenUrl {
-                                url: available_update.html_url.clone(),
-                                new_tab: true,
-                            });
-                        });
-                    }
-                }
+
                 ui.with_layout(egui::Layout::left_to_right(Align::TOP), |ui| {
                     if let Some(last_action) = &self.last_action {
                         let msg = match &last_action.status {
@@ -1965,17 +1843,6 @@ impl eframe::App for App {
                     let mods = Self::build_mod_string(&mods);
                     ui.output_mut(|o| o.copied_text = mods);
                 }
-
-                // TODO find better icon, flesh out multiple-view usage, fix GUI locking
-                /*
-                if ui
-                    .button("pop out")
-                    .on_hover_text_at_pointer("pop out")
-                    .clicked()
-                {
-                    self.open_profiles.insert(mod_data.active_profile.clone());
-                }
-                */
             };
 
             if profile_bar::ui(

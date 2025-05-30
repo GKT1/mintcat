@@ -41,10 +41,7 @@ pub enum Message {
     Integrate(Integrate),
     FetchModProgress(FetchModProgress),
     UpdateCache(UpdateCache),
-    CheckUpdates(CheckUpdates),
     LintMods(LintMods),
-    SelfUpdate(SelfUpdate),
-    FetchSelfUpdateProgress(FetchSelfUpdateProgress),
 }
 
 impl Message {
@@ -54,10 +51,7 @@ impl Message {
             Self::Integrate(msg) => msg.receive(app),
             Self::FetchModProgress(msg) => msg.receive(app),
             Self::UpdateCache(msg) => msg.receive(app),
-            Self::CheckUpdates(msg) => msg.receive(app),
             Self::LintMods(msg) => msg.receive(app),
-            Self::SelfUpdate(msg) => msg.receive(app),
-            Self::FetchSelfUpdateProgress(msg) => msg.receive(app),
         }
     }
 }
@@ -301,117 +295,6 @@ impl UpdateCache {
 }
 
 #[derive(Debug)]
-pub struct CheckUpdates {
-    rid: RequestID,
-    result: Result<GitHubRelease, GenericError>,
-}
-
-impl CheckUpdates {
-    pub fn send(app: &mut App, ctx: &egui::Context) {
-        info!("Start Check Update ....");
-        let rid = app.request_counter.next();
-        let tx = app.tx.clone();
-        let ctx = ctx.clone();
-
-        let handle = tokio::spawn(async move {
-            tx.send(Message::CheckUpdates(Self {
-                rid,
-                result: mint_lib::update::get_latest_release().await,
-            }))
-            .await
-            .unwrap();
-            ctx.request_repaint();
-        });
-        app.check_updates_rid = Some(MessageHandle {
-            rid,
-            handle,
-            state: (),
-        });
-    }
-
-    fn receive(self, app: &mut App) {
-        if Some(self.rid) == app.check_updates_rid.as_ref().map(|r| r.rid) {
-            app.check_updates_rid = None;
-            match self.result {
-                Ok(release) => {
-                    if let (Ok(version), Some(Ok(release_version))) = (
-                        semver::Version::parse(env!("CARGO_PKG_VERSION")),
-                        release
-                            .tag_name
-                            .strip_prefix('v')
-                            .map(semver::Version::parse),
-                    ) {
-                        if release_version > version {
-                            app.available_update = Some(release);
-                            app.show_update_time = Some(SystemTime::now());
-                        }
-                    }
-                }
-                Err(e) => tracing::warn!("failed to fetch update {e}"),
-            }
-        }
-    }
-}
-
-async fn integrate_async(
-    store: Arc<ModStore>,
-    ctx: egui::Context,
-    mod_specs: Vec<ModSpecification>,
-    fsd_pak: PathBuf,
-    config: MetaConfig,
-    rid: RequestID,
-    message_tx: Sender<Message>,
-) -> Result<(), IntegrationError> {
-    let update = false;
-
-    let mods = store.resolve_mods(&mod_specs, update).await?;
-
-    let to_integrate = mod_specs
-        .iter()
-        .map(|u| mods[u].clone())
-        .collect::<Vec<_>>();
-    let res_map: HashMap<ModResolution, ModSpecification> = mods
-        .iter()
-        .map(|(spec, info)| (info.resolution.clone(), spec.clone()))
-        .collect();
-    let urls = to_integrate
-        .iter()
-        .map(|m| &m.resolution)
-        .collect::<Vec<_>>();
-
-    let (tx, mut rx) = mpsc::channel::<FetchProgress>(10);
-
-    tokio::spawn(async move {
-        while let Some(progress) = rx.recv().await {
-            if let Some(spec) = res_map.get(progress.resolution()) {
-                message_tx
-                    .send(Message::FetchModProgress(FetchModProgress {
-                        rid,
-                        spec: spec.clone(),
-                        progress: progress.into(),
-                    }))
-                    .await
-                    .unwrap();
-                ctx.request_repaint();
-            }
-        }
-    });
-
-    let paths = store.fetch_mods_ordered(&urls, update, Some(tx)).await?;
-
-    tokio::task::spawn_blocking(|| {
-        integrate::integrate(
-            fsd_pak,
-            config,
-            to_integrate.into_iter().zip(paths).collect(),
-        )
-    })
-    .await??;
-
-    Ok(())
-}
-
-#[derive(Debug)]
 pub struct LintMods {
     rid: RequestID,
     result: Result<LintReport, IntegrationError>,
@@ -493,6 +376,64 @@ impl LintMods {
     }
 }
 
+async fn integrate_async(
+    store: Arc<ModStore>,
+    ctx: egui::Context,
+    mod_specs: Vec<ModSpecification>,
+    fsd_pak: PathBuf,
+    config: MetaConfig,
+    rid: RequestID,
+    message_tx: Sender<Message>,
+) -> Result<(), IntegrationError> {
+    let update = false;
+
+    let mods = store.resolve_mods(&mod_specs, update).await?;
+
+    let to_integrate = mod_specs
+        .iter()
+        .map(|u| mods[u].clone())
+        .collect::<Vec<_>>();
+    let res_map: HashMap<ModResolution, ModSpecification> = mods
+        .iter()
+        .map(|(spec, info)| (info.resolution.clone(), spec.clone()))
+        .collect();
+    let urls = to_integrate
+        .iter()
+        .map(|m| &m.resolution)
+        .collect::<Vec<_>>();
+
+    let (tx, mut rx) = mpsc::channel::<FetchProgress>(10);
+
+    tokio::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            if let Some(spec) = res_map.get(progress.resolution()) {
+                message_tx
+                    .send(Message::FetchModProgress(FetchModProgress {
+                        rid,
+                        spec: spec.clone(),
+                        progress: progress.into(),
+                    }))
+                    .await
+                    .unwrap();
+                ctx.request_repaint();
+            }
+        }
+    });
+
+    let paths = store.fetch_mods_ordered(&urls, update, Some(tx)).await?;
+
+    tokio::task::spawn_blocking(|| {
+        integrate::integrate(
+            fsd_pak,
+            config,
+            to_integrate.into_iter().zip(paths).collect(),
+        )
+    })
+    .await??;
+
+    Ok(())
+}
+
 async fn resolve_async_ordered(
     store: Arc<ModStore>,
     ctx: egui::Context,
@@ -536,197 +477,4 @@ async fn resolve_async_ordered(
     });
 
     Ok(store.fetch_mods_ordered(&urls, update, Some(tx)).await?)
-}
-
-#[derive(Debug)]
-pub struct SelfUpdate {
-    rid: RequestID,
-    result: Result<PathBuf, IntegrationError>,
-}
-
-impl SelfUpdate {
-    pub fn send(
-        rc: &mut RequestCounter,
-        tx: Sender<Message>,
-        ctx: egui::Context,
-    ) -> MessageHandle<SelfUpdateProgress> {
-        let rid = rc.next();
-        MessageHandle {
-            rid,
-            handle: tokio::task::spawn(async move {
-                let result = self_update_async(ctx.clone(), rid, tx.clone()).await;
-                tx.send(Message::SelfUpdate(SelfUpdate { rid, result }))
-                    .await
-                    .unwrap();
-                ctx.request_repaint();
-            }),
-            state: SelfUpdateProgress::Pending,
-        }
-    }
-
-    fn receive(self, app: &mut App) {
-        if Some(self.rid) == app.self_update_rid.as_ref().map(|r| r.rid) {
-            match self.result {
-                Ok(original_exe_path) => {
-                    info!("self update complete");
-                    app.original_exe_path = Some(original_exe_path);
-                    app.last_action = Some(LastAction::success("self update complete".to_string()));
-                }
-                Err(e) => {
-                    error!("self update failed");
-                    error!("{:#?}", e);
-                    app.self_update_rid = None;
-                    app.last_action = Some(LastAction::failure("self update failed".to_string()));
-                }
-            }
-            app.integrate_rid = None;
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct FetchSelfUpdateProgress {
-    rid: RequestID,
-    progress: SelfUpdateProgress,
-}
-
-impl FetchSelfUpdateProgress {
-    fn receive(self, app: &mut App) {
-        if let Some(MessageHandle { rid, state, .. }) = &mut app.self_update_rid {
-            if *rid == self.rid {
-                *state = self.progress;
-            }
-        }
-    }
-}
-
-async fn self_update_async(
-    ctx: egui::Context,
-    rid: RequestID,
-    message_tx: Sender<Message>,
-) -> Result<PathBuf, IntegrationError> {
-    use futures::stream::TryStreamExt;
-    use tokio::io::AsyncWriteExt;
-
-    let (tx, mut rx) = mpsc::channel::<SelfUpdateProgress>(1);
-
-    tokio::spawn(async move {
-        while let Some(progress) = rx.recv().await {
-            message_tx
-                .send(Message::FetchSelfUpdateProgress(FetchSelfUpdateProgress {
-                    rid,
-                    progress,
-                }))
-                .await
-                .unwrap();
-            ctx.request_repaint();
-        }
-    });
-
-    let client = reqwest::Client::new();
-
-    let asset_name = if cfg!(target_os = "windows") {
-        "mintcat-x86_64-pc-windows-msvc.zip"
-    } else if cfg!(target_os = "linux") {
-        "mint-x86_64-unknown-linux-gnu.zip"
-    } else {
-        unimplemented!("unsupported platform");
-    };
-
-    info!("downloading update");
-
-    let response = client
-        .get(format!(
-            "https://api.v1st.net/https://github.com/iriscats/mint/releases/latest/download/{asset_name}"
-        ))
-        .send()
-        .await
-        .map_err(Into::into)
-        .with_context(|_| SelfUpdateFailedSnafu)?
-        .error_for_status()
-        .map_err(Into::into)
-        .with_context(|_| SelfUpdateFailedSnafu)?;
-    let size = response.content_length();
-    debug!(?response);
-    debug!(?size);
-
-    let tmp_dir = tempfile::Builder::new()
-        .prefix("self_update")
-        .tempdir_in(std::env::current_dir()?)?;
-    let tmp_archive_path = tmp_dir.path().join(asset_name);
-    let mut tmp_archive = tokio::fs::File::create(&tmp_archive_path)
-        .await
-        .map_err(Into::into)
-        .with_context(|_| SelfUpdateFailedSnafu)?;
-    let mut stream = response.bytes_stream();
-
-    let mut total_bytes_written = 0;
-    while let Some(bytes) = stream
-        .try_next()
-        .await
-        .map_err(Into::into)
-        .with_context(|_| SelfUpdateFailedSnafu)?
-    {
-        let bytes_written = tmp_archive.write(&bytes).await?;
-        total_bytes_written += bytes_written;
-        if let Some(size) = size {
-            tx.send(SelfUpdateProgress::Progress {
-                progress: total_bytes_written as u64,
-                size,
-            })
-            .await
-            .unwrap();
-        }
-    }
-
-    debug!(?tmp_dir);
-    debug!(?tmp_archive_path);
-    debug!(?tmp_archive);
-
-    let original_exe_path =
-        tokio::task::spawn_blocking(move || -> Result<PathBuf, IntegrationError> {
-            let bin_name = if cfg!(target_os = "windows") {
-                "mintcat.exe"
-            } else if cfg!(target_os = "linux") {
-                "mint"
-            } else {
-                unimplemented!("unsupported platform");
-            };
-
-            info!("extracting downloaded update archive");
-            self_update::Extract::from_source(&tmp_archive_path)
-                .archive(self_update::ArchiveKind::Zip)
-                .extract_file(tmp_dir.path(), bin_name)
-                .map_err(Into::into)
-                .with_context(|_| SelfUpdateFailedSnafu)?;
-
-            info!("replacing old executable with new executable");
-            let tmp_file = tmp_dir.path().join("replacement_tmp");
-            let bin_path = tmp_dir.path().join(bin_name);
-
-            let original_exe_path = std::env::current_exe()?;
-
-            self_update::Move::from_source(&bin_path)
-                .replace_using_temp(&tmp_file)
-                .to_dest(&original_exe_path)
-                .map_err(Into::into)
-                .with_context(|_| SelfUpdateFailedSnafu)?;
-
-            #[cfg(target_os = "linux")]
-            {
-                info!("setting executable permission on new executable");
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&original_exe_path, std::fs::Permissions::from_mode(0o755))
-                    .unwrap();
-            }
-
-            Ok(original_exe_path)
-        })
-        .await??;
-
-    tx.send(SelfUpdateProgress::Complete).await.unwrap();
-
-    info!("update successful");
-
-    Ok(original_exe_path)
 }

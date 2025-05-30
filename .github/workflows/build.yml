@@ -1,0 +1,25 @@
+name: Rust
+
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install MinGW toolchain
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: Build
+        run: cargo build --verbose --release --target x86_64-pc-windows-gnu
+      - name: Run tests
+        run: cargo test --verbose # Tests will still run for the host (Linux) using debug profile
+      - name: Upload Windows Executable (Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mintcat-windows-release-exe
+          path: target/x86_64-pc-windows-gnu/release/mintcat.exe
+          if-no-files-found: error # Optional: Fails the workflow if the file isn't found 
