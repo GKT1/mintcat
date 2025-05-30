@@ -13,6 +13,8 @@ use patternsleuth::resolvers::unreal::*;
 use patternsleuth::resolvers::*;
 use patternsleuth::scanner::Pattern;
 use patternsleuth::MemoryTrait;
+use patternsleuth::MemoryAccessorTrait;
+
 
 #[cfg(feature = "serde-resolvers")]
 use serde::{Deserialize, Serialize};
